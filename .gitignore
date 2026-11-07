@@ -1,0 +1,54 @@
+# Build çıktıları
+bin/
+obj/
+dist/
+AlfMcp.Release/
+publish/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# Visual Studio / VS Code / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.rsuser
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/stop-alfmcp.ps1
+
+# Test ve kapsam çıktıları
+TestResults/
+*.trx
+coverage*.xml
+*.coverage
+
+# NuGet ve yerel paketler
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# Günlükler ve geçici dosyalar
+*.log
+*.tmp
+*.bak
+*.swp
+Thumbs.db
+.DS_Store
+
+# Uygulamanın çalışma verisi (kullanıcıya ait: workspace'ler, ayarlar, tarayıcı profili); asla repoya girmez
+data/
+workspace/
+**/data/
+
+# Yerel gizli ayarlar
+appsettings.Development.json
+secrets.json
+.env
+.env.*
