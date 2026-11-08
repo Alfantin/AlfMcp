@@ -81,6 +81,9 @@ public class WidgetTests : IDisposable {
         Assert.Contains("tailwindcss", page);
         Assert.Contains("@custom-variant dark", page);
         Assert.Contains("background: transparent", page);
+        Assert.Contains("option, optgroup { background-color: var(--field-solid)", page);
+        Assert.Contains("--field-solid: #262626", page);
+        Assert.Contains("#root { max-height: 420px; overflow-y: auto; }", page);
         Assert.Contains("prefers-color-scheme", page);
         Assert.Contains("name=\"color-scheme\" content=\"light dark\"", page);
         Assert.Contains(":root.dark { color-scheme: dark;", page);
@@ -89,4 +92,33 @@ public class WidgetTests : IDisposable {
         Assert.Contains("Ui.call", page.Replace("call: function", "Ui.call"));
     }
 
+
+    [Fact]
+    public void Delete_RemovesTheStoredFile_AndTheNameDisappearsFromTheList() {
+        var tool = fixture.Get<WidgetTool>();
+        tool.Run("<b>x</b>", name: "math-quiz");
+
+        var reply = tool.Run(name: "math-quiz", action: "delete");
+
+        Assert.True(reply.IsError != true);
+        Assert.False(File.Exists(Path.Combine(fixture.Store.Home, "math-quiz.html")));
+        Assert.DoesNotContain("math-quiz", TextOf(tool.Run()));
+    }
+
+    [Fact]
+    public void Delete_UnknownWidget_OrMissingName_OrBadAction_IsAnError() {
+        var tool = fixture.Get<WidgetTool>();
+
+        Assert.True(tool.Run(name: "nope", action: "delete").IsError);
+        Assert.True(tool.Run(action: "delete").IsError);
+        Assert.True(tool.Run(name: "nope", action: "remove").IsError);
+    }
+
+    [Fact]
+    public void Saving_EmptyHtml_IsRefused_SoDeleteIsNotFakedByOverwriting() {
+        var tool = fixture.Get<WidgetTool>();
+
+        Assert.True(tool.Run("  ", name: "math-quiz").IsError);
+        Assert.Empty(Directory.GetFiles(fixture.Store.Home, "*.html"));
+    }
 }

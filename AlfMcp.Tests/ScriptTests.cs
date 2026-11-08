@@ -220,6 +220,88 @@ public class ScriptTests : IDisposable {
         Assert.Equal("k", handler.Requests.Single().Headers.GetValues("X-Key").Single());
     }
 
+    private sealed class DelegateHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler {
+
+        public string? RequestBody { get; private set; }
+
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) {
+            RequestBody = request.Content?.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult();
+            return respond(request);
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+            return Task.FromResult(Send(request, cancellationToken));
+        }
+
+    }
+
+    private ScriptTool ToolWith(DelegateHandler handler) {
+        return new ScriptTool(fixture.Get<Functions>(), new Script(fixture.Store, fixture.Get<Jsonl>(), fixture.Get<Functions>(), new HttpClient(handler)));
+    }
+
+    private static HttpResponseMessage Bytes(byte[] bytes, string contentType) {
+        var content = new ByteArrayContent(bytes);
+        content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+    }
+
+    [Fact]
+    public void Http_ContentTypeHeader_ReplacesTheDefault_NotAppendedToIt() {
+        var handler = new DelegateHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") });
+
+        ToolWith(handler).Run("return http('https://x.test/search', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'q=a' }).status");
+
+        Assert.Equal("q=a", handler.RequestBody);
+    }
+
+    [Fact]
+    public void Http_ContentTypeHeaderSeenByTheServer_IsExactlyTheOneTheScriptChose() {
+        string? seen = null;
+        var handler = new DelegateHandler(request => {
+            seen = request.Content!.Headers.ContentType!.ToString();
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") };
+        });
+
+        ToolWith(handler).Run("return http('https://x.test/s', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=windows-1254' }, body: 'q=a' }).status");
+
+        Assert.Equal("application/x-www-form-urlencoded; charset=windows-1254", seen);
+    }
+
+    [Fact]
+    public void Http_Form_IsPercentEncoded_InTheRequestedCharset() {
+        var handler = new DelegateHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("ok") });
+
+        ToolWith(handler).Run("return http('https://x.test/s', { method: 'POST', form: { q: 'şeker & çay' } }).status");
+        var utf8 = handler.RequestBody;
+        ToolWith(handler).Run("return http('https://x.test/s', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=windows-1254' }, form: { q: 'şeker & çay' } }).status");
+
+        Assert.Equal("q=%C5%9Feker+%26+%C3%A7ay", utf8);
+        Assert.Equal("q=%FEeker+%26+%E7ay", handler.RequestBody);
+    }
+
+    [Fact]
+    public void Http_ResponseCharset_FromHeader_Meta_AndLegacyFallback_AreDecoded() {
+        var turkish = System.Text.Encoding.GetEncoding("windows-1254");
+        var viaHeader = ToolWith(new DelegateHandler(_ => Bytes(turkish.GetBytes("Çağrı Şeker"), "text/html; charset=windows-1254")));
+        var viaMeta = ToolWith(new DelegateHandler(_ => Bytes(turkish.GetBytes("<meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1254\">Çağrı Şeker"), "text/html")));
+        var viaFallback = ToolWith(new DelegateHandler(_ => Bytes(turkish.GetBytes("Çağrı Şeker"), "text/plain")));
+        var utf8 = ToolWith(new DelegateHandler(_ => Bytes(System.Text.Encoding.UTF8.GetBytes("Çağrı Şeker"), "text/plain")));
+
+        Assert.Contains("Çağrı Şeker", viaHeader.Run("return http('https://x.test/').body"));
+        Assert.Contains("Çağrı Şeker", viaMeta.Run("return http('https://x.test/').body"));
+        Assert.Contains("Çağrı Şeker", viaFallback.Run("return http('https://x.test/').body"));
+        Assert.Contains("Çağrı Şeker", utf8.Run("return http('https://x.test/').body"));
+    }
+
+    [Fact]
+    public void Http_ReturnsOkFlag_FinalUrl_AndResponseHeaders() {
+        var handler = new DelegateHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("bad") });
+
+        var reply = ToolWith(handler).Run("const r = http('https://x.test/a'); return [r.ok, r.status, r.url, typeof r.headers].join('|')");
+
+        Assert.Contains("false|400|https://x.test/a|object", reply);
+    }
+
     [Fact]
     public void Http_RejectsNonHttpSchemes() {
         Assert.Throws<McpException>(() => fixture.Get<ScriptTool>().Run("return http('file:///c:/windows/win.ini').body"));

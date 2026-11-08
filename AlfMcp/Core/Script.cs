@@ -1,8 +1,10 @@
 using Jint;
 using ModelContextProtocol;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace AlfMcp.Core;
 
@@ -11,7 +13,11 @@ namespace AlfMcp.Core;
 // Bir çalıştırmanın isteğe bağlı ayarları: süre (sn), iptal belirteci ve ilerleme bildirimi (MCP progress).
 public sealed record RunOptions(int? TimeoutSeconds = null, CancellationToken Token = default, IProgress<ProgressNotificationValue>? Progress = null);
 
-public sealed class Script(Store store, Jsonl jsonl, Functions functions, HttpClient client) {
+public sealed partial class Script(Store store, Jsonl jsonl, Functions functions, HttpClient client) {
+
+    static Script() {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+    }
 
     private const int MaxDepth = 5;
     private const int MaxBodyBytes = 5_000_000;
@@ -85,13 +91,22 @@ public sealed class Script(Store store, Jsonl jsonl, Functions functions, HttpCl
 
         var options = JsonDocument.Parse(optionsJson).RootElement;
         var request = new HttpRequestMessage(new HttpMethod(options.TryGetProperty("method", out var method) ? method.GetString()!.ToUpperInvariant() : "GET"), uri);
-        if(options.TryGetProperty("body", out var body)) {
-            var text = body.ValueKind == JsonValueKind.String ? body.GetString()! : body.GetRawText();
-            request.Content = new StringContent(text, Encoding.UTF8, body.ValueKind == JsonValueKind.String ? "text/plain" : "application/json");
+        var contentType = options.TryGetProperty("headers", out var headerObject) ? headerObject.EnumerateObject().FirstOrDefault(header => string.Equals(header.Name, "Content-Type", StringComparison.OrdinalIgnoreCase)) : default;
+        var requestType = contentType.Value.ValueKind == JsonValueKind.String ? MediaTypeHeaderValue.Parse(contentType.Value.GetString()!) : null;
+        var requestEncoding = Charset(requestType?.CharSet) ?? new UTF8Encoding(false);
+        if(options.TryGetProperty("form", out var form) && form.ValueKind == JsonValueKind.Object) {
+            var pairs = form.EnumerateObject().Select(field => PercentEncode(field.Name, requestEncoding) + "=" + PercentEncode(field.Value.ValueKind == JsonValueKind.String ? field.Value.GetString()! : field.Value.ToString(), requestEncoding));
+            request.Content = new ByteArrayContent(Encoding.ASCII.GetBytes(string.Join("&", pairs)));
+            request.Content.Headers.ContentType = requestType ?? new MediaTypeHeaderValue("application/x-www-form-urlencoded");
+        }
+        else if(options.TryGetProperty("body", out var body)) {
+            var isText = body.ValueKind == JsonValueKind.String;
+            request.Content = new ByteArrayContent(requestEncoding.GetBytes(isText ? body.GetString()! : body.GetRawText()));
+            request.Content.Headers.ContentType = requestType ?? new MediaTypeHeaderValue(isText ? "text/plain" : "application/json") { CharSet = "utf-8" };
         }
 
         if(options.TryGetProperty("headers", out var headers)) {
-            foreach(var header in headers.EnumerateObject()) {
+            foreach(var header in headers.EnumerateObject().Where(header => !string.Equals(header.Name, "Content-Type", StringComparison.OrdinalIgnoreCase) && !string.Equals(header.Name, "Content-Length", StringComparison.OrdinalIgnoreCase))) {
                 if(!request.Headers.TryAddWithoutValidation(header.Name, header.Value.ToString())) {
                     request.Content?.Headers.TryAddWithoutValidation(header.Name, header.Value.ToString());
                 }
@@ -109,8 +124,62 @@ public sealed class Script(Store store, Jsonl jsonl, Functions functions, HttpCl
             length += read;
         }
 
-        return JsonSerializer.Serialize(new { status = (int)response.StatusCode, body = Encoding.UTF8.GetString(buffer, 0, length) });
+        var status = (int)response.StatusCode;
+        var responseHeaders = response.Headers.Concat(response.Content.Headers).ToDictionary(header => header.Key.ToLowerInvariant(), header => string.Join(", ", header.Value));
+        return JsonSerializer.Serialize(new { status, ok = status is >= 200 and < 300, url = response.RequestMessage?.RequestUri?.ToString() ?? url, headers = responseHeaders, body = DecodeBody(response.Content.Headers.ContentType, buffer, length) });
     }
+
+    // Yanıt gövdesini doğru karakter kümesiyle çözer: önce başlıktaki charset, sonra html/xml içindeki meta charset, sonra katı UTF-8, olmazsa windows-1254 (eski Türkçe siteler).
+    private static string DecodeBody(MediaTypeHeaderValue? type, byte[] buffer, int length) {
+        var encoding = Charset(type?.CharSet);
+        if(encoding is null && type?.MediaType is { } media && (media.Contains("html") || media.Contains("xml"))) {
+            var head = Encoding.ASCII.GetString(buffer, 0, Math.Min(length, 4096));
+            var match = MetaCharset().Match(head);
+            encoding = match.Success ? Charset(match.Groups[1].Value) : null;
+        }
+        if(encoding is null) {
+            try {
+                encoding = new UTF8Encoding(false, true);
+                return encoding.GetString(buffer, 0, length).TrimStart('﻿');
+            }
+            catch(DecoderFallbackException) {
+                encoding = Charset("windows-1254")!;
+            }
+        }
+        return encoding.GetString(buffer, 0, length).TrimStart('﻿');
+    }
+
+    private static Encoding? Charset(string? name) {
+        if(string.IsNullOrWhiteSpace(name)) {
+            return null;
+        }
+        try {
+            return Encoding.GetEncoding(name.Trim().Trim('"', '\''));
+        }
+        catch(ArgumentException) {
+            return null;
+        }
+    }
+
+    // Form alanı kodlaması: baytlar verilen karakter kümesine göre yüzde-kodlanır (eski siteler windows-1254 ister).
+    private static string PercentEncode(string text, Encoding encoding) {
+        var result = new StringBuilder();
+        foreach(var value in encoding.GetBytes(text)) {
+            if(value is >= (byte)'a' and <= (byte)'z' or >= (byte)'A' and <= (byte)'Z' or >= (byte)'0' and <= (byte)'9' or (byte)'-' or (byte)'_' or (byte)'.' or (byte)'~') {
+                result.Append((char)value);
+            }
+            else if(value == (byte)' ') {
+                result.Append('+');
+            }
+            else {
+                result.Append('%').Append(value.ToString("X2"));
+            }
+        }
+        return result.ToString();
+    }
+
+    [GeneratedRegex("charset\\s*=\\s*[\"']?([\\w-]+)", RegexOptions.IgnoreCase)]
+    private static partial Regex MetaCharset();
 
     // Betiğin veri erişimi: namespace klasörlerindeki koleksiyonlar.
     private string Database(string operation, string collection, string json) {

@@ -17,13 +17,29 @@
     --color-surface: var(--surface);
     --color-accent: var(--accent);
 }
+/* Form alanları tema renklerini kullanır (koyu temada beyaz zemin / okunmayan yazı olmasın). base katmanında: widget'ın kendi Tailwind sınıfları yine üstün gelir. */
+@layer base {
+    input, select, textarea, button { font: inherit; color: var(--fg); }
+    input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]):not([type=submit]), select, textarea {
+        background-color: var(--field);
+        border: 1px solid var(--line);
+        border-radius: 0.5rem;
+        padding: 0.25rem 0.5rem;
+    }
+    option, optgroup { background-color: var(--field-solid); color: var(--fg); }
+    input::placeholder, textarea::placeholder { color: var(--muted); }
+    input, select, textarea { accent-color: var(--accent); }
+    input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+}
 </style>
 <style>
 /* Tema renkleri tek yerde: widget'lar text-fg, text-muted, border-line, bg-surface, text-accent yazar, dark: çifti gerekmez. */
 /* color-scheme iframe belgesinde istemciyle aynı olmalı; aksi halde tarayıcı saydam yerine opak beyaz zemin boyar. */
-:root { color-scheme: light; --fg: #171717; --muted: #737373; --line: #e5e5e5; --surface: rgba(0, 0, 0, 0.035); --accent: #2563eb; }
-:root.dark { color-scheme: dark; --fg: #f5f5f5; --muted: #a3a3a3; --line: #3a3a3a; --surface: rgba(255, 255, 255, 0.06); --accent: #60a5fa; }
+:root { color-scheme: light; --fg: #171717; --muted: #737373; --line: #e5e5e5; --surface: rgba(0, 0, 0, 0.035); --accent: #2563eb; --field: rgba(0, 0, 0, 0.03); --field-solid: #ffffff; }
+:root.dark { color-scheme: dark; --fg: #f5f5f5; --muted: #a3a3a3; --line: #3a3a3a; --surface: rgba(255, 255, 255, 0.06); --accent: #60a5fa; --field: rgba(255, 255, 255, 0.07); --field-solid: #262626; }
 html, body { background: transparent; margin: 0; }
+/* En yüksek yükseklik: uzun içerik sohbeti taşırmaz, widget'ın kendi içinde kayar. */
+#root { max-height: 420px; overflow-y: auto; }
 body { color: var(--fg); font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif; padding: 2px; }
 </style>
 <script>document.documentElement.classList.toggle('dark', matchMedia('(prefers-color-scheme: dark)').matches);</script>
@@ -105,6 +121,27 @@ var Ui = (function () {
 
     return {
         args: {},
+        // confirm()/alert() iframe'de engelli (allow-modals yok); onay için bunu kullan: Ui.confirm('Silinsin mi?').then(function (yes) { ... }).
+        // Onay çubuğu içeriğin üstünde satır içi açılır, widget ne kadar kısa olursa olsun sığar.
+        confirm: function (message, yesLabel, noLabel) {
+            return new Promise(function (resolve) {
+                var bar = $('<div class="mb-2 flex items-center justify-between gap-3 rounded-xl border border-line bg-surface p-3 text-sm"></div>');
+                var done = function (answer) {
+                    bar.remove();
+                    resolve(answer);
+                };
+                bar.append($('<span class="text-fg"></span>').text(message));
+                var buttons = $('<span class="flex gap-2"></span>');
+                buttons.append($('<button type="button" class="rounded-lg bg-accent px-3 py-1 text-white"></button>').text(yesLabel || 'Evet').on('click', function () {
+                    done(true);
+                }));
+                buttons.append($('<button type="button" class="rounded-lg border border-line px-3 py-1 text-fg"></button>').text(noLabel || 'Hayır').on('click', function () {
+                    done(false);
+                }));
+                bar.append(buttons);
+                $('#root').prepend(bar);
+            });
+        },
         // Kayıtlı bir betiği (script) çalıştırır ve sonucunu verir.
         call: function (name, values) {
             return rpc('tools/call', { name: 'script', arguments: { name: name, args: values || {} } }).then(function (result) {
